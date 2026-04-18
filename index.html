@@ -1,0 +1,544 @@
+<!DOCTYPE html>
+<html lang="ja">
+<head>
+  <meta charset="UTF-8" />
+  <meta name="viewport" content="width=device-width, initial-scale=1.0" />
+  <title>図書館この日何の日抽出ツール</title>
+  <style>
+    body { font-family: system-ui, -apple-system, BlinkMacSystemFont, "Segoe UI", sans-serif; line-height: 1.5; margin: 0; background: #f7f7f9; color: #222; }
+    .wrap { max-width: 1100px; margin: 0 auto; padding: 20px; }
+    .card { background: #fff; border: 1px solid #ddd; border-radius: 12px; padding: 16px; margin-bottom: 16px; box-shadow: 0 1px 2px rgba(0,0,0,0.04); }
+    h1 { font-size: 1.6rem; margin: 0 0 12px; }
+    h2 { font-size: 1.1rem; margin: 0 0 10px; }
+    .grid { display: grid; grid-template-columns: repeat(auto-fit, minmax(220px, 1fr)); gap: 12px; }
+    label { font-weight: 600; display: block; margin-bottom: 6px; }
+    input, textarea, button, select { font: inherit; }
+    input, textarea, select { width: 100%; box-sizing: border-box; padding: 10px 12px; border: 1px solid #bbb; border-radius: 8px; background: #fff; }
+    textarea { min-height: 120px; resize: vertical; }
+    .btns { display: flex; flex-wrap: wrap; gap: 10px; margin-top: 12px; }
+    button { padding: 10px 14px; border: 1px solid #999; border-radius: 8px; background: #f3f3f3; cursor: pointer; }
+    button.primary { background: #1f6feb; color: #fff; border-color: #1f6feb; }
+    button:disabled { opacity: 0.55; cursor: not-allowed; }
+    .note { font-size: 0.92rem; color: #555; }
+    .status { font-weight: 600; }
+    .mono { font-family: ui-monospace, SFMono-Regular, Menlo, Consolas, monospace; }
+    #log { white-space: pre-wrap; background: #111; color: #e6edf3; padding: 12px; border-radius: 8px; min-height: 220px; max-height: 420px; overflow: auto; }
+    table { width: 100%; border-collapse: collapse; font-size: 0.95rem; }
+    th, td { border: 1px solid #ddd; padding: 8px; vertical-align: top; }
+    th { background: #f0f0f0; position: sticky; top: 0; }
+    .scroll { overflow: auto; max-height: 520px; }
+    .small { font-size: 0.88rem; color: #666; }
+  </style>
+</head>
+<body>
+  <div class="wrap">
+    <div class="card">
+      <h1>図書館この日何の日抽出ツール</h1>
+      <div class="note">
+        MMDD 形式で期間を指定してください。キーワードは改行して追加してください。Wikipedia の日付ページから、できごと、誕生日、忌日、記念日・年中行事ごとに抽出します。抽出結果はCSVにも出力可能です。
+      </div>
+    </div>
+
+    <div class="card">
+      <h2>設定</h2>
+      <div class="grid">
+        <div>
+          <label for="start">開始日</label>
+          <input id="start" value="0101" maxlength="4" />
+        </div>
+        <div>
+          <label for="end">終了日</label>
+          <input id="end" value="0131" maxlength="4" />
+        </div>
+        <div>
+          <label for="sleepMs">通常待機（ミリ秒）</label>
+          <input id="sleepMs" type="number" value="1500" min="0" step="100" />
+        </div>
+      </div>
+      <div style="margin-top:12px;">
+        <label for="keywords">キーワード（1行1語）</label>
+        <textarea id="keywords"></textarea>
+      </div>
+      <div class="btns">
+        <button id="runBtn" class="primary">実行</button>
+        <button id="stopBtn">停止</button>
+        <button id="downloadBtn" disabled>CSVを保存</button>
+      </div>
+      <div style="margin-top:10px;" class="small">
+        429 Too Many Requests が出たときは、待機して自動再試行します。ブラウザ実行のため、Wikipedia 側の制限や通信状態で速度は変わります。期間を狭くしたり、キーワードを限定すると429エラーは回避しやすくなります。
+      </div>
+    </div>
+
+    <div class="card">
+      <h2>進捗</h2>
+      <div class="status" id="status">待機中</div>
+      <div class="small" id="summary">未実行</div>
+    </div>
+
+    <div class="card">
+      <h2>ログ</h2>
+      <div id="log"></div>
+    </div>
+
+    <div class="card">
+      <h2>結果プレビュー</h2>
+      <div class="scroll">
+        <table>
+          <thead>
+            <tr>
+              <th>date</th>
+              <th>section</th>
+              <th>matched_keywords</th>
+              <th>item</th>
+            </tr>
+          </thead>
+          <tbody id="resultsBody"></tbody>
+        </table>
+      </div>
+    </div>
+  </div>
+
+  <script>
+    const API_URL = "https://ja.wikipedia.org/w/api.php";
+
+    const WIKITEXT_SECTIONS = ["できごと", "記念日・年中行事"];
+    const HTML_SECTIONS = ["誕生日", "忌日"];
+    const ALL_SECTIONS = [...WIKITEXT_SECTIONS, ...HTML_SECTIONS];
+
+    const defaultKeywords = [
+    ];
+
+    const state = {
+      stopRequested: false,
+      results: [],
+      processed: 0,
+      total: 0,
+    };
+
+    const el = {
+      start: document.getElementById('start'),
+      end: document.getElementById('end'),
+      sleepMs: document.getElementById('sleepMs'),
+      keywords: document.getElementById('keywords'),
+      runBtn: document.getElementById('runBtn'),
+      stopBtn: document.getElementById('stopBtn'),
+      downloadBtn: document.getElementById('downloadBtn'),
+      status: document.getElementById('status'),
+      summary: document.getElementById('summary'),
+      log: document.getElementById('log'),
+      resultsBody: document.getElementById('resultsBody'),
+    };
+
+    el.keywords.value = defaultKeywords.join('\n');
+
+    function log(message) {
+      const timestamp = new Date().toLocaleTimeString();
+      el.log.textContent += `[${timestamp}] ${message}\n`;
+      el.log.scrollTop = el.log.scrollHeight;
+    }
+
+    function sleep(ms) {
+      return new Promise(resolve => setTimeout(resolve, ms));
+    }
+
+    function escapeHTML(str) {
+      return String(str ?? '')
+        .replace(/&/g, '&amp;')
+        .replace(/</g, '&lt;')
+        .replace(/>/g, '&gt;')
+        .replace(/"/g, '&quot;')
+        .replace(/'/g, '&#39;');
+    }
+
+    function normalizeText(text) {
+      return text
+        .normalize('NFKC')
+        .replace(/\[\d+\]/g, '')
+        .replace(/\s+/g, ' ')
+        .trim();
+    }
+
+    function getKeywords() {
+      return el.keywords.value
+        .split(/\r?\n/)
+        .map(s => s.trim())
+        .filter(Boolean);
+    }
+
+    function matchedKeywords(text, keywords) {
+      const textNorm = text.normalize('NFKC').toLowerCase();
+      return keywords.filter(k => textNorm.includes(k.normalize('NFKC').toLowerCase()));
+    }
+
+    function parseMMDD(mmdd) {
+      if (!/^\d{4}$/.test(mmdd)) {
+        throw new Error('MMDD は4桁の数字で入力してください。');
+      }
+      const month = Number(mmdd.slice(0, 2));
+      const day = Number(mmdd.slice(2, 4));
+      const d = new Date(2024, month - 1, day);
+      if (d.getFullYear() !== 2024 || d.getMonth() !== month - 1 || d.getDate() !== day) {
+        throw new Error(`存在しない日付です: ${mmdd}`);
+      }
+      return d;
+    }
+
+    function formatTitle(dateObj) {
+      return `${dateObj.getMonth() + 1}月${dateObj.getDate()}日`;
+    }
+
+    function buildDateRange(startMMDD, endMMDD) {
+      const start = parseMMDD(startMMDD);
+      const end = parseMMDD(endMMDD);
+      if (end < start) {
+        throw new Error('終了日は開始日以降にしてください。');
+      }
+      const dates = [];
+      const current = new Date(start);
+      while (current <= end) {
+        dates.push(formatTitle(current));
+        current.setDate(current.getDate() + 1);
+      }
+      return dates;
+    }
+
+    async function politeFetch(params, maxRetries = 6) {
+      const url = new URL(API_URL);
+      Object.entries({ ...params, origin: '*' }).forEach(([k, v]) => url.searchParams.set(k, v));
+
+      for (let attempt = 1; attempt <= maxRetries; attempt++) {
+        const response = await fetch(url.toString(), {
+          headers: {
+            'Accept': 'application/json'
+          }
+        });
+
+        if (response.status === 429) {
+          const retryAfter = response.headers.get('Retry-After');
+          const waitSec = retryAfter && /^\d+$/.test(retryAfter)
+            ? Number(retryAfter)
+            : Math.min(300, 30 * attempt);
+          log(`[RATE LIMIT] 429 Too Many Requests。${waitSec}秒待って再試行します。`);
+          await sleep(waitSec * 1000);
+          continue;
+        }
+
+        if (!response.ok) {
+          throw new Error(`HTTP ${response.status}: ${response.statusText}`);
+        }
+
+        return response.json();
+      }
+      throw new Error('429が続いたため取得を中止しました。');
+    }
+
+    async function getWikitext(title) {
+      const data = await politeFetch({
+        action: 'query',
+        prop: 'revisions',
+        titles: title,
+        rvprop: 'content',
+        rvslots: 'main',
+        format: 'json',
+        formatversion: '2'
+      });
+
+      const pages = data?.query?.pages || [];
+      if (!pages.length || !pages[0].revisions) {
+        throw new Error(`${title}: 本文を取得できませんでした`);
+      }
+
+      return pages[0].revisions[0].slots.main.content;
+    }
+
+    async function getSections(title) {
+      const data = await politeFetch({
+        action: 'parse',
+        page: title,
+        prop: 'sections',
+        format: 'json',
+        formatversion: '2'
+      });
+      if (data.error) {
+        throw new Error(`${title}: sections を取得できませんでした`);
+      }
+      return data?.parse?.sections || [];
+    }
+
+    async function getSectionHTML(title, sectionIndex) {
+      const data = await politeFetch({
+        action: 'parse',
+        page: title,
+        prop: 'text',
+        section: sectionIndex,
+        format: 'json',
+        formatversion: '2'
+      });
+      if (data.error) {
+        throw new Error(`${title}: section ${sectionIndex} の HTML を取得できませんでした`);
+      }
+      return data.parse.text;
+    }
+
+    function extractRefsFromText(text) {
+      const refs = [];
+      const refPattern = /<ref\b[^>]*>([\s\S]*?)<\/ref>/gi;
+      let match;
+      while ((match = refPattern.exec(text)) !== null) {
+        const content = match[1] || '';
+        let url = null;
+        let title = null;
+
+        const citeWebUrl = content.match(/\|\s*url\s*=\s*([^|}\n]+)/i);
+        if (citeWebUrl) url = citeWebUrl[1].trim();
+
+        const bareUrl = content.match(/https?:\/\/[^\s|}<>]+/i);
+        if (!url && bareUrl) url = bareUrl[0].trim();
+
+        const citeWebTitle = content.match(/\|\s*title\s*=\s*([^|}\n]+)/i);
+        if (citeWebTitle) title = citeWebTitle[1].trim();
+
+        const externalLabel = content.match(/\[(https?:\/\/[^\s\]]+)\s+([^\]]+)\]/i);
+        if (!url && externalLabel) url = externalLabel[1].trim();
+        if (!title && externalLabel) title = externalLabel[2].trim();
+
+        if (url) refs.push({ url, title: title || url });
+      }
+      return refs;
+    }
+
+    function stripWikiMarkup(text) {
+      return text
+        .replace(/<ref\b[^>]*>[\s\S]*?<\/ref>/gi, '')
+        .replace(/<ref\b[^>]*\/\s*>/gi, '')
+        .replace(/\{\{[\s\S]*?\}\}/g, '')
+        .replace(/'''?/g, '')
+        .replace(/\[\[(?:[^|\]]*\|)?([^\]]+)\]\]/g, '$1')
+        .replace(/\[https?:\/\/[^\s\]]+\s+([^\]]+)\]/g, '$1')
+        .replace(/&nbsp;/g, ' ');
+    }
+
+    function buildItemPayloadFromWikitext(rawText) {
+      const refs = extractRefsFromText(rawText);
+      const cleanText = normalizeText(stripWikiMarkup(rawText));
+      const refsHtml = refs.map(ref => `<div><a href="${escapeHTML(ref.url)}" target="_blank" rel="noopener noreferrer">${escapeHTML(ref.title)}</a></div>`).join('');
+      const itemHtml = refsHtml ? `${escapeHTML(cleanText)}<br>${refsHtml}` : escapeHTML(cleanText);
+      const itemCsv = refs.length ? `${cleanText}\n${refs.map(ref => `${ref.title} (${ref.url})`).join('\n')}` : cleanText;
+      return { text: cleanText, itemHtml, itemCsv };
+    }
+
+    function buildItemPayloadFromHTMLLi(li) {
+      const refs = [];
+      li.querySelectorAll('sup.reference a[href]').forEach(a => {
+        const href = a.getAttribute('href');
+        if (!href) return;
+        const fullHref = href.startsWith('http') ? href : new URL(href, 'https://ja.wikipedia.org/').toString();
+        const label = (a.textContent || '').trim();
+        refs.push({ url: fullHref, title: label || fullHref });
+      });
+      li.querySelectorAll('sup.reference').forEach(ref => ref.remove());
+      const cleanText = normalizeText(li.textContent || '');
+      const refsHtml = refs.map(ref => `<div><a href="${escapeHTML(ref.url)}" target="_blank" rel="noopener noreferrer">${escapeHTML(ref.title)}</a></div>`).join('');
+      const itemHtml = refsHtml ? `${escapeHTML(cleanText)}<br>${refsHtml}` : escapeHTML(cleanText);
+      const itemCsv = refs.length ? `${cleanText}\n${refs.map(ref => `${ref.title} (${ref.url})`).join('\n')}` : cleanText;
+      return { text: cleanText, itemHtml, itemCsv };
+    }
+
+    function extractItemsFromWikitext(wikitext) {
+      const results = [];
+      let currentSection = null;
+
+      for (const rawLine of wikitext.split(/\r?\n/)) {
+        const line = rawLine.trim();
+        const m2 = line.match(/^==\s*(.+?)\s*==\s*$/);
+        const m3 = line.match(/^===\s*(.+?)\s*===\s*$/);
+
+        if (m2) {
+          const sec = m2[1];
+          currentSection = WIKITEXT_SECTIONS.includes(sec) ? sec : null;
+          continue;
+        }
+
+        if (m3) continue;
+
+        if (currentSection && /^\*\s*/.test(line)) {
+          const payload = buildItemPayloadFromWikitext(line.replace(/^\*\s*/, ''));
+          if (payload.text) {
+            results.push({ section: currentSection, ...payload });
+          }
+        }
+      }
+
+      return results;
+    }
+
+    function extractItemsFromSectionHTML(html, sectionTitle) {
+      const parser = new DOMParser();
+      const doc = parser.parseFromString(html, 'text/html');
+      const results = [];
+      doc.querySelectorAll('li').forEach(li => {
+        const payload = buildItemPayloadFromHTMLLi(li.cloneNode(true));
+        if (payload.text) {
+          results.push({ section: sectionTitle, ...payload });
+        }
+      });
+      return results;
+    }
+
+    async function extractItemsFromHTMLSections(title) {
+      const results = [];
+      const sections = await getSections(title);
+      const targetMap = new Map();
+
+      for (const sec of sections) {
+        if (HTML_SECTIONS.includes(sec.line) && sec.index != null) {
+          targetMap.set(sec.line, sec.index);
+        }
+      }
+
+      for (const sectionTitle of HTML_SECTIONS) {
+        if (!targetMap.has(sectionTitle)) continue;
+        const html = await getSectionHTML(title, targetMap.get(sectionTitle));
+        results.push(...extractItemsFromSectionHTML(html, sectionTitle));
+      }
+
+      return results;
+    }
+
+    function renderResults() {
+      el.resultsBody.innerHTML = '';
+      state.results.slice(0, 500).forEach(row => {
+        const tr = document.createElement('tr');
+
+        const tdDate = document.createElement('td');
+        tdDate.textContent = row.date;
+        tr.appendChild(tdDate);
+
+        const tdSection = document.createElement('td');
+        tdSection.textContent = row.section;
+        tr.appendChild(tdSection);
+
+        const tdKeywords = document.createElement('td');
+        tdKeywords.textContent = row.matched_keywords;
+        tr.appendChild(tdKeywords);
+
+        const tdItem = document.createElement('td');
+        tdItem.innerHTML = row.item_html || escapeHTML(row.item || '');
+        tr.appendChild(tdItem);
+
+        el.resultsBody.appendChild(tr);
+      });
+    }
+
+    function updateSummary() {
+      el.summary.textContent = `処理: ${state.processed}/${state.total} 日付 | 抽出件数: ${state.results.length}`;
+    }
+
+    function downloadCSV() {
+      if (!state.results.length) return;
+      const header = ['date', 'section', 'matched_keywords', 'item'];
+      const rows = state.results.map(r => [r.date, r.section, r.matched_keywords, r.item_csv ?? r.item]);
+      const csvLines = [header, ...rows].map(cols => cols.map(v => {
+        const s = String(v ?? '');
+        return '"' + s.replace(/"/g, '""') + '"';
+      }).join(','));
+      const bom = '\uFEFF';
+      const blob = new Blob([bom + csvLines.join('\r\n')], { type: 'text/csv;charset=utf-8;' });
+      const url = URL.createObjectURL(blob);
+      const a = document.createElement('a');
+      a.href = url;
+      a.download = 'wikipedia_date_pages_keywords_selected_range.csv';
+      document.body.appendChild(a);
+      a.click();
+      a.remove();
+      URL.revokeObjectURL(url);
+    }
+
+    async function run() {
+      state.stopRequested = false;
+      state.results = [];
+      state.processed = 0;
+      el.resultsBody.innerHTML = '';
+      el.log.textContent = '';
+      el.downloadBtn.disabled = true;
+
+      let dates;
+      try {
+        dates = buildDateRange(el.start.value.trim(), el.end.value.trim());
+      } catch (err) {
+        alert(err.message);
+        return;
+      }
+
+      const keywords = getKeywords();
+      const sleepMs = Math.max(0, Number(el.sleepMs.value) || 0);
+      state.total = dates.length;
+      updateSummary();
+      el.status.textContent = '実行中';
+      el.runBtn.disabled = true;
+
+      for (const title of dates) {
+        if (state.stopRequested) {
+          log('停止要求を受け付けました。');
+          break;
+        }
+
+        log(`Fetching: ${title}`);
+
+        try {
+          const items = [];
+          const wikitext = await getWikitext(title);
+          items.push(...extractItemsFromWikitext(wikitext));
+          items.push(...await extractItemsFromHTMLSections(title));
+
+          const pageMatches = [];
+          for (const item of items) {
+            const hits = matchedKeywords(item.text, keywords);
+            if (hits.length) {
+              const row = {
+                date: title,
+                section: item.section,
+                matched_keywords: hits.join(', '),
+                item: item.text,
+                item_html: item.itemHtml,
+                item_csv: item.itemCsv,
+              };
+              state.results.push(row);
+              pageMatches.push(row);
+            }
+          }
+
+          const countsBySection = Object.fromEntries(ALL_SECTIONS.map(s => [s, 0]));
+          const matchedBySection = Object.fromEntries(ALL_SECTIONS.map(s => [s, 0]));
+          for (const item of items) countsBySection[item.section] = (countsBySection[item.section] || 0) + 1;
+          for (const row of pageMatches) matchedBySection[row.section] = (matchedBySection[row.section] || 0) + 1;
+
+          log(`[PAGE] ${title} | 総項目=${items.length} | できごと=${countsBySection['できごと'] || 0} | 記念日・年中行事=${countsBySection['記念日・年中行事'] || 0} | 誕生日=${countsBySection['誕生日'] || 0} | 忌日=${countsBySection['忌日'] || 0} | 一致=${pageMatches.length}`);
+        } catch (err) {
+          log(`[WARN] ${title} ${String(err.message || err)}`);
+        }
+
+        state.processed += 1;
+        updateSummary();
+        renderResults();
+
+        if (!state.stopRequested && sleepMs > 0) {
+          await sleep(sleepMs);
+        }
+      }
+
+      el.status.textContent = state.stopRequested ? '停止済み' : '完了';
+      el.runBtn.disabled = false;
+      el.downloadBtn.disabled = state.results.length === 0;
+      renderResults();
+      updateSummary();
+    }
+
+    el.runBtn.addEventListener('click', run);
+    el.stopBtn.addEventListener('click', () => {
+      state.stopRequested = true;
+    });
+    el.downloadBtn.addEventListener('click', downloadCSV);
+  </script>
+</body>
+</html>
