@@ -1,3 +1,4 @@
+
 <!DOCTYPE html>
 <html lang="ja">
 <head>
@@ -106,6 +107,15 @@
     const ALL_SECTIONS = [...WIKITEXT_SECTIONS, ...HTML_SECTIONS];
 
     const defaultKeywords = [
+      "中央アジア", "北アフリカ", "中東",
+      "マグリブ", "アラブ", "湾岸", "GCC",
+      "イスラーム", "イスラム",
+      "カザフスタン", "ウズベキスタン", "キルギス", "タジキスタン", "トルクメニスタン",
+      "モロッコ", "アルジェリア", "チュニジア", "リビア", "エジプト", "西サハラ",
+      "トルコ", "イラン", "イラク", "シリア", "レバノン", "イスラエル",
+      "パレスチナ", "パレスチナ国", "ヨルダン", "サウジアラビア", "イエメン", "オマーン",
+      "アラブ首長国連邦", "UAE", "カタール", "バーレーン", "クウェート",
+      "アフガニスタン"
     ];
 
     const state = {
@@ -141,21 +151,74 @@
       return new Promise(resolve => setTimeout(resolve, ms));
     }
 
-    function escapeHTML(str) {
-      return String(str ?? '')
-        .replace(/&/g, '&amp;')
-        .replace(/</g, '&lt;')
-        .replace(/>/g, '&gt;')
-        .replace(/"/g, '&quot;')
-        .replace(/'/g, '&#39;');
-    }
-
     function normalizeText(text) {
-      return text
+      return String(text || '')
         .normalize('NFKC')
         .replace(/\[\d+\]/g, '')
         .replace(/\s+/g, ' ')
         .trim();
+    }
+
+    function escapeHTML(text) {
+      return String(text || '').replace(/[&<>\"']/g, ch => ({'&':'&amp;','<':'&lt;','>':'&gt;','\"':'&quot;',"'":'&#39;'}[ch]));
+    }
+
+    function stripWikiMarkup(text) {
+      let s = String(text || '');
+      s = s.replace(/<ref\b[^>]*>[\s\S]*?<\/ref>/gi, '');
+      s = s.replace(/<ref\b[^/>]*\/>/gi, '');
+      // 仮リンクや interlanguage link 系テンプレートは表示ラベルを保持する
+      s = s.replace(/\{\{\s*仮リンク\s*\|\s*([^|{}]+?)(?:\|[^{}]*)?\}\}/gi, '$1');
+      s = s.replace(/\{\{\s*ill\s*\|\s*([^|{}]+?)(?:\|[^{}]*)?\}\}/gi, '$1');
+      s = s.replace(/\{\{\s*lang(?:-[a-z]+)?\s*\|\s*([^|{}]+?)\s*\}\}/gi, '$1');
+      s = s.replace(/\{\{\s*en\s*\|\s*([^|{}]+?)\s*\}\}/gi, '$1');
+      s = s.replace(/\{\{[^{}]*\}\}/g, '');
+      s = s.replace(/'''?/g, '');
+      s = s.replace(/\[\[(?:[^|\]]*\|)?([^\]]+)\]\]/g, '$1');
+      s = s.replace(/\[https?:\/\/[^\s\]]+\s+([^\]]+)\]/g, '$1');
+      s = s.replace(/<[^>]+>/g, '');
+      return normalizeText(s);
+    }
+
+    function extractRefLinksFromWikitext(text) {
+      const refs = [];
+      const refPattern = /<ref\b[^>]*>([\s\S]*?)<\/ref>/gi;
+      let match;
+      while ((match = refPattern.exec(String(text || ''))) !== null) {
+        const content = match[1] || '';
+        let url = null;
+        let title = null;
+
+        const mUrl = content.match(/\|\s*url\s*=\s*([^|}\n]+)/i);
+        if (mUrl) url = mUrl[1].trim();
+        const bareUrl = content.match(/https?:\/\/[^\s|}<>]+/i);
+        if (!url && bareUrl) url = bareUrl[0].trim();
+
+        const mTitle = content.match(/\|\s*title\s*=\s*([^|}\n]+)/i);
+        if (mTitle) title = stripWikiMarkup(mTitle[1].trim());
+        const extLink = content.match(/\[(https?:\/\/[^\s\]]+)\s+([^\]]+)\]/i);
+        if (!url && extLink) url = extLink[1].trim();
+        if (!title && extLink) title = stripWikiMarkup(extLink[2].trim());
+
+        if (url && title) refs.push({url, title});
+      }
+      return refs;
+    }
+
+    function buildItemPayloadFromWikitext(rawText) {
+      const refs = extractRefLinksFromWikitext(rawText);
+      const cleanText = stripWikiMarkup(rawText);
+      const refsHtml = refs.map(ref => `<div><a href="${escapeHTML(ref.url)}" target="_blank" rel="noopener noreferrer">${escapeHTML(ref.title)}</a></div>`).join('');
+      const itemHtml = refsHtml ? `${escapeHTML(cleanText)}<br>${refsHtml}` : escapeHTML(cleanText);
+      const itemCsv = refs.length ? `${cleanText}\n${refs.map(ref => `${ref.title} (${ref.url})`).join('\n')}` : cleanText;
+      return { text: cleanText, itemHtml, itemCsv };
+    }
+
+    function buildItemPayloadFromHTMLLi(li) {
+      const clone = li.cloneNode(true);
+      clone.querySelectorAll('sup.reference, .mw-cite-backlink, .reference').forEach(el => el.remove());
+      const cleanText = stripWikiMarkup(clone.textContent || '');
+      return { text: cleanText, itemHtml: escapeHTML(cleanText), itemCsv: cleanText };
     }
 
     function getKeywords() {
@@ -280,73 +343,39 @@
       return data.parse.text;
     }
 
-    function extractRefsFromText(text) {
-      const refs = [];
-      const refPattern = /<ref\b[^>]*>([\s\S]*?)<\/ref>/gi;
-      let match;
-      while ((match = refPattern.exec(text)) !== null) {
-        const content = match[1] || '';
-        let url = null;
-        let title = null;
-
-        const citeWebUrl = content.match(/\|\s*url\s*=\s*([^|}\n]+)/i);
-        if (citeWebUrl) url = citeWebUrl[1].trim();
-
-        const bareUrl = content.match(/https?:\/\/[^\s|}<>]+/i);
-        if (!url && bareUrl) url = bareUrl[0].trim();
-
-        const citeWebTitle = content.match(/\|\s*title\s*=\s*([^|}\n]+)/i);
-        if (citeWebTitle) title = citeWebTitle[1].trim();
-
-        const externalLabel = content.match(/\[(https?:\/\/[^\s\]]+)\s+([^\]]+)\]/i);
-        if (!url && externalLabel) url = externalLabel[1].trim();
-        if (!title && externalLabel) title = externalLabel[2].trim();
-
-        if (url) refs.push({ url, title: title || url });
-      }
-      return refs;
-    }
-
-    function stripWikiMarkup(text) {
-      return text
-        .replace(/<ref\b[^>]*>[\s\S]*?<\/ref>/gi, '')
-        .replace(/<ref\b[^>]*\/\s*>/gi, '')
-        .replace(/\{\{[\s\S]*?\}\}/g, '')
-        .replace(/'''?/g, '')
-        .replace(/\[\[(?:[^|\]]*\|)?([^\]]+)\]\]/g, '$1')
-        .replace(/\[https?:\/\/[^\s\]]+\s+([^\]]+)\]/g, '$1')
-        .replace(/&nbsp;/g, ' ');
-    }
-
-    function buildItemPayloadFromWikitext(rawText) {
-      const refs = extractRefsFromText(rawText);
-      const cleanText = normalizeText(stripWikiMarkup(rawText));
-      const refsHtml = refs.map(ref => `<div><a href="${escapeHTML(ref.url)}" target="_blank" rel="noopener noreferrer">${escapeHTML(ref.title)}</a></div>`).join('');
-      const itemHtml = refsHtml ? `${escapeHTML(cleanText)}<br>${refsHtml}` : escapeHTML(cleanText);
-      const itemCsv = refs.length ? `${cleanText}\n${refs.map(ref => `${ref.title} (${ref.url})`).join('\n')}` : cleanText;
-      return { text: cleanText, itemHtml, itemCsv };
-    }
-
-    function buildItemPayloadFromHTMLLi(li) {
-      const refs = [];
-      li.querySelectorAll('sup.reference a[href]').forEach(a => {
-        const href = a.getAttribute('href');
-        if (!href) return;
-        const fullHref = href.startsWith('http') ? href : new URL(href, 'https://ja.wikipedia.org/').toString();
-        const label = (a.textContent || '').trim();
-        refs.push({ url: fullHref, title: label || fullHref });
-      });
-      li.querySelectorAll('sup.reference').forEach(ref => ref.remove());
-      const cleanText = normalizeText(li.textContent || '');
-      const refsHtml = refs.map(ref => `<div><a href="${escapeHTML(ref.url)}" target="_blank" rel="noopener noreferrer">${escapeHTML(ref.title)}</a></div>`).join('');
-      const itemHtml = refsHtml ? `${escapeHTML(cleanText)}<br>${refsHtml}` : escapeHTML(cleanText);
-      const itemCsv = refs.length ? `${cleanText}\n${refs.map(ref => `${ref.title} (${ref.url})`).join('\n')}` : cleanText;
-      return { text: cleanText, itemHtml, itemCsv };
-    }
-
     function extractItemsFromWikitext(wikitext) {
       const results = [];
       let currentSection = null;
+      let memorialItem = null;
+
+      function flushMemorialItem() {
+        if (!memorialItem) return;
+        const titleText = stripWikiMarkup(memorialItem.titleRaw || '');
+        const descParts = (memorialItem.descRawList || [])
+          .map(part => stripWikiMarkup(part).replace(/^[:：\-\s]+/, ''))
+          .filter(Boolean);
+        const combined = descParts.length ? `${titleText}：${descParts.join(' ')}` : titleText;
+        const refs = [];
+        for (const chunk of [memorialItem.titleRaw, ...(memorialItem.descRawList || [])]) {
+          refs.push(...extractRefLinksFromWikitext(chunk || ''));
+        }
+        const uniq = [];
+        const seen = new Set();
+        for (const ref of refs) {
+          const key = `${ref.title}\t${ref.url}`;
+          if (!seen.has(key)) {
+            seen.add(key);
+            uniq.push(ref);
+          }
+        }
+        if (combined) {
+          const refsHtml = uniq.map(ref => `<div><a href="${escapeHTML(ref.url)}" target="_blank" rel="noopener noreferrer">${escapeHTML(ref.title)}</a></div>`).join('');
+          const itemHtml = refsHtml ? `${escapeHTML(combined)}<br>${refsHtml}` : escapeHTML(combined);
+          const itemCsv = uniq.length ? `${combined}\n${uniq.map(ref => `${ref.title} (${ref.url})`).join('\n')}` : combined;
+          results.push({ section: '記念日・年中行事', text: combined, itemHtml, itemCsv });
+        }
+        memorialItem = null;
+      }
 
       for (const rawLine of wikitext.split(/\r?\n/)) {
         const line = rawLine.trim();
@@ -354,14 +383,43 @@
         const m3 = line.match(/^===\s*(.+?)\s*===\s*$/);
 
         if (m2) {
+          flushMemorialItem();
           const sec = m2[1];
           currentSection = WIKITEXT_SECTIONS.includes(sec) ? sec : null;
           continue;
         }
 
-        if (m3) continue;
+        if (m3) {
+          if (currentSection === '記念日・年中行事') flushMemorialItem();
+          continue;
+        }
 
-        if (currentSection && /^\*\s*/.test(line)) {
+        if (!currentSection) continue;
+
+        if (currentSection === '記念日・年中行事') {
+          if (/^\*[^:*#]/.test(line)) {
+            flushMemorialItem();
+            memorialItem = {
+              titleRaw: line.replace(/^\*\s*/, ''),
+              descRawList: []
+            };
+            continue;
+          }
+
+          if (memorialItem && /^(?:\*+|:+|[#:*]+)\s*/.test(line)) {
+            memorialItem.descRawList.push(line.replace(/^(?:\*+|:+|[#:*]+)\s*/, ''));
+            continue;
+          }
+
+          if (memorialItem && line) {
+            memorialItem.descRawList.push(line);
+            continue;
+          }
+
+          continue;
+        }
+
+        if (/^\*\s*/.test(line)) {
           const payload = buildItemPayloadFromWikitext(line.replace(/^\*\s*/, ''));
           if (payload.text) {
             results.push({ section: currentSection, ...payload });
@@ -369,6 +427,7 @@
         }
       }
 
+      flushMemorialItem();
       return results;
     }
 
@@ -376,12 +435,17 @@
       const parser = new DOMParser();
       const doc = parser.parseFromString(html, 'text/html');
       const results = [];
+
+      doc.querySelectorAll('ol.references li, ul.references li, .mw-references-wrap li').forEach(el => el.remove());
+
       doc.querySelectorAll('li').forEach(li => {
-        const payload = buildItemPayloadFromHTMLLi(li.cloneNode(true));
+        if (li.closest('ol.references, ul.references, .mw-references-wrap, .references')) return;
+        const payload = buildItemPayloadFromHTMLLi(li);
         if (payload.text) {
           results.push({ section: sectionTitle, ...payload });
         }
       });
+
       return results;
     }
 
@@ -423,7 +487,7 @@
         tr.appendChild(tdKeywords);
 
         const tdItem = document.createElement('td');
-        tdItem.innerHTML = row.item_html || escapeHTML(row.item || '');
+        tdItem.innerHTML = row.itemHtml || escapeHTML(row.item || '');
         tr.appendChild(tdItem);
 
         el.resultsBody.appendChild(tr);
@@ -437,7 +501,7 @@
     function downloadCSV() {
       if (!state.results.length) return;
       const header = ['date', 'section', 'matched_keywords', 'item'];
-      const rows = state.results.map(r => [r.date, r.section, r.matched_keywords, r.item_csv ?? r.item]);
+      const rows = state.results.map(r => [r.date, r.section, r.matched_keywords, r.itemCsv || r.item]);
       const csvLines = [header, ...rows].map(cols => cols.map(v => {
         const s = String(v ?? '');
         return '"' + s.replace(/"/g, '""') + '"';
@@ -500,8 +564,6 @@
                 section: item.section,
                 matched_keywords: hits.join(', '),
                 item: item.text,
-                item_html: item.itemHtml,
-                item_csv: item.itemCsv,
               };
               state.results.push(row);
               pageMatches.push(row);
