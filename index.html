@@ -36,7 +36,7 @@
     <div class="card">
       <h1>図書館この日何の日抽出ツール</h1>
       <div class="note">
-        MMDD 形式で期間を指定してください。キーワードは改行して追加してください。Wikipedia の日付ページから、できごと、誕生日、忌日、記念日・年中行事ごとに抽出します。抽出結果はCSVにも出力可能です。
+        MMDD 形式で期間を指定してください。キーワードは改行して追加してください。日本語Wikipedia の日付ページから、できごと、誕生日、忌日、記念日・年中行事ごとに抽出します。抽出結果はCSVにも出力可能です。
       </div>
     </div>
 
@@ -51,9 +51,22 @@
           <label for="end">終了日</label>
           <input id="end" value="0131" maxlength="4" />
         </div>
-        <div>
-          <label for="sleepMs">通常待機（ミリ秒）</label>
-          <input id="sleepMs" type="number" value="1500" min="0" step="100" />
+      </div>
+      <div style="margin-top:12px;">
+        <label>探索対象</label>
+        <div class="grid" style="grid-template-columns: repeat(auto-fit, minmax(180px, 1fr)); gap: 8px;">
+          <label style="font-weight: 400; display: flex; align-items: center; gap: 8px; margin-bottom: 0;">
+            <input id="includeEvents" type="checkbox" checked style="width: auto;" />
+            <span>できごと</span>
+          </label>
+          <label style="font-weight: 400; display: flex; align-items: center; gap: 8px; margin-bottom: 0;">
+            <input id="includeMemorials" type="checkbox" checked style="width: auto;" />
+            <span>記念日・年中行事</span>
+          </label>
+          <label style="font-weight: 400; display: flex; align-items: center; gap: 8px; margin-bottom: 0;">
+            <input id="includeBirthDeath" type="checkbox" checked style="width: auto;" />
+            <span>誕生日・忌日</span>
+          </label>
         </div>
       </div>
       <div style="margin-top:12px;">
@@ -66,7 +79,7 @@
         <button id="downloadBtn" disabled>CSVを保存</button>
       </div>
       <div style="margin-top:10px;" class="small">
-        429 Too Many Requests が出たときは、待機して自動再試行します。ブラウザ実行のため、Wikipedia 側の制限や通信状態で速度は変わります。期間を狭くしたり、キーワードを限定すると429エラーは回避しやすくなります。
+        取得期間の上限は100日です。ブラウザ実行のため、Wikipedia 側の制限や通信状態で速度は変わります。期間を狭くしたり、キーワードを限定するとエラーは回避しやすくなります。
       </div>
     </div>
 
@@ -89,7 +102,7 @@
             <tr>
               <th>date</th>
               <th>section</th>
-              <th>matched_keywords</th>
+              <th>keyword</th>
               <th>item</th>
             </tr>
           </thead>
@@ -111,16 +124,24 @@
 
     const state = {
       stopRequested: false,
+      fatalError: false,
       results: [],
       processed: 0,
       total: 0,
     };
 
+    const REQUEST_INTERVAL_MS = 3000;
+    const MAX_RANGE_DAYS = 100;
+    const API_USER_AGENT = 'WhatDayforLibraryTool/1.0 (contact: Yuta_Hayashi@ide.go.jp)';
+    let lastRequestAt = 0;
+
     const el = {
       start: document.getElementById('start'),
       end: document.getElementById('end'),
-      sleepMs: document.getElementById('sleepMs'),
       keywords: document.getElementById('keywords'),
+      includeEvents: document.getElementById('includeEvents'),
+      includeMemorials: document.getElementById('includeMemorials'),
+      includeBirthDeath: document.getElementById('includeBirthDeath'),
       runBtn: document.getElementById('runBtn'),
       stopBtn: document.getElementById('stopBtn'),
       downloadBtn: document.getElementById('downloadBtn'),
@@ -219,6 +240,17 @@
         .filter(Boolean);
     }
 
+    function getSelectedSections() {
+      const selected = [];
+      if (el.includeEvents.checked) selected.push('できごと');
+      if (el.includeMemorials.checked) selected.push('記念日・年中行事');
+      if (el.includeBirthDeath.checked) {
+        selected.push('誕生日');
+        selected.push('忌日');
+      }
+      return selected;
+    }
+
     function matchedKeywords(text, keywords) {
       const textNorm = text.normalize('NFKC').toLowerCase();
       return keywords.filter(k => textNorm.includes(k.normalize('NFKC').toLowerCase()));
@@ -253,37 +285,45 @@
         dates.push(formatTitle(current));
         current.setDate(current.getDate() + 1);
       }
+      if (dates.length > MAX_RANGE_DAYS) {
+        throw new Error(`データ取得日数の上限は${MAX_RANGE_DAYS}日です。期間を短くしてください。`);
+      }
       return dates;
     }
 
-    async function politeFetch(params, maxRetries = 6) {
+    async function politeFetch(params) {
       const url = new URL(API_URL);
-      Object.entries({ ...params, origin: '*' }).forEach(([k, v]) => url.searchParams.set(k, v));
+      Object.entries({ ...params, origin: '*', maxlag: '5' }).forEach(([k, v]) => url.searchParams.set(k, v));
 
-      for (let attempt = 1; attempt <= maxRetries; attempt++) {
-        const response = await fetch(url.toString(), {
-          headers: {
-            'Accept': 'application/json'
-          }
-        });
+      const now = Date.now();
+      const elapsed = now - lastRequestAt;
+      if (elapsed < REQUEST_INTERVAL_MS) {
+        await sleep(REQUEST_INTERVAL_MS - elapsed);
+      }
+
+      const response = await fetch(url.toString(), {
+        headers: {
+          'Accept': 'application/json',
+          'Api-User-Agent': API_USER_AGENT
+        }
+      });
+      lastRequestAt = Date.now();
 
         if (response.status === 429) {
-          const retryAfter = response.headers.get('Retry-After');
-          const waitSec = retryAfter && /^\d+$/.test(retryAfter)
-            ? Number(retryAfter)
-            : Math.min(300, 30 * attempt);
-          log(`[RATE LIMIT] 429 Too Many Requests。${waitSec}秒待って再試行します。`);
-          await sleep(waitSec * 1000);
-          continue;
-        }
+          throw new Error('429 Too Many Requests が返されたため、処理を即時終了します。時間をおいて再実行してください。');
+      }
 
         if (!response.ok) {
           throw new Error(`HTTP ${response.status}: ${response.statusText}`);
         }
 
-        return response.json();
+        const data = await response.json();
+      if (data && data.error) {
+        const info = data.error.info ? ` ${data.error.info}` : '';
+        throw new Error(`Error:${info} 処理を即時終了します。`);
       }
-      throw new Error('429が続いたため取得を中止しました。');
+
+      return data;
     }
 
     async function getWikitext(title) {
@@ -491,7 +531,7 @@
 
     function downloadCSV() {
       if (!state.results.length) return;
-      const header = ['date', 'section', 'matched_keywords', 'item'];
+      const header = ['date', 'section', 'keyword', 'item'];
       const rows = state.results.map(r => [r.date, r.section, r.matched_keywords, r.itemCsv || r.item]);
       const csvLines = [header, ...rows].map(cols => cols.map(v => {
         const s = String(v ?? '');
@@ -502,7 +542,7 @@
       const url = URL.createObjectURL(blob);
       const a = document.createElement('a');
       a.href = url;
-      a.download = 'wikipedia_date_pages_keywords_selected_range.csv';
+      a.download = 'keyword_results.csv';
       document.body.appendChild(a);
       a.click();
       a.remove();
@@ -526,7 +566,11 @@
       }
 
       const keywords = getKeywords();
-      const sleepMs = Math.max(0, Number(el.sleepMs.value) || 0);
+      const selectedSections = getSelectedSections();
+      if (selectedSections.length === 0) {
+        alert('探索対象を1つ以上選択してください。');
+        return;
+      }
       state.total = dates.length;
       updateSummary();
       el.status.textContent = '実行中';
@@ -542,9 +586,13 @@
 
         try {
           const items = [];
-          const wikitext = await getWikitext(title);
-          items.push(...extractItemsFromWikitext(wikitext));
-          items.push(...await extractItemsFromHTMLSections(title));
+          if (selectedSections.some(section => WIKITEXT_SECTIONS.includes(section))) {
+            const wikitext = await getWikitext(title);
+            items.push(...extractItemsFromWikitext(wikitext).filter(item => selectedSections.includes(item.section)));
+          }
+          if (selectedSections.some(section => HTML_SECTIONS.includes(section))) {
+            items.push(...(await extractItemsFromHTMLSections(title)).filter(item => selectedSections.includes(item.section)));
+          }
 
           const pageMatches = [];
           for (const item of items) {
@@ -568,16 +616,18 @@
 
           log(`[PAGE] ${title} | 総項目=${items.length} | できごと=${countsBySection['できごと'] || 0} | 記念日・年中行事=${countsBySection['記念日・年中行事'] || 0} | 誕生日=${countsBySection['誕生日'] || 0} | 忌日=${countsBySection['忌日'] || 0} | 一致=${pageMatches.length}`);
         } catch (err) {
-          log(`[WARN] ${title} ${String(err.message || err)}`);
+          log(`[ERROR] ${title} ${String(err.message || err)}`);
+          state.processed += 1;
+          updateSummary();
+          renderResults();
+          state.stopRequested = true;
+          state.fatalError = true;
+          break;
         }
 
         state.processed += 1;
         updateSummary();
         renderResults();
-
-        if (!state.stopRequested && sleepMs > 0) {
-          await sleep(sleepMs);
-        }
       }
 
       el.status.textContent = state.stopRequested ? '停止済み' : '完了';
